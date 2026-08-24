@@ -146,6 +146,23 @@ cmd_wizard() {
   cmd_clone "${args[@]}"
 }
 
+# ---------------------------------------------------------------- signing
+
+resign_adhoc() {
+  local clone="$1"
+
+  # Ad-hoc deep sign, dropping all entitlements. This is deliberate, not a
+  # shortcut: the original app's entitlements (application-identifier,
+  # keychain-access-groups, com.apple.developer.*) are scoped to the vendor's
+  # Team ID. An ad-hoc signature has no team, so a process that CLAIMS them
+  # cannot prove them and taskgated kills it at launch. Carrying them over was
+  # tested and makes the clone exit immediately. Dropping them keeps the clone
+  # launchable; the visible cost is a one-time keychain-access prompt on first
+  # run (click "Always Allow"), because the clone is a new signing identity and
+  # cannot silently reuse the original's keychain items.
+  codesign --force --deep --sign - "$clone" >/dev/null 2>&1
+}
+
 # ---------------------------------------------------------------- the clone
 
 cmd_clone() {
@@ -247,7 +264,7 @@ EOF
 
   say "Signing ad-hoc"
   xattr -cr "$dest" 2>/dev/null || true
-  codesign --force --deep --sign - "$dest"
+  resign_adhoc "$dest"
 
   say "Done"
   codesign -dv "$dest" 2>&1 | grep -E 'Identifier=|Signature=' | sed 's/^/    /' || true

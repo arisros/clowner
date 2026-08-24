@@ -83,6 +83,13 @@ clowner list          # every app clowner can see, and whether it is Chromium-ba
 
 ## Caveats
 
+- **First launch shows a keychain password prompt** — click *Always Allow*, once.
+  The clone is a new signing identity, so macOS asks before it may use the
+  keychain (Chromium's "Safe Storage" key for cookies/passwords). This is
+  expected and cannot be avoided: the original's entitlements are scoped to
+  the vendor's Team ID, and an ad-hoc clone that *claims* them is killed at
+  launch by the OS — so clowner deliberately drops them to keep the clone
+  launchable.
 - The clone is signed **ad-hoc**: no hardened runtime, no original team ID.
   Anything that keys off the team ID — some keychain items, some app-specific
   entitlements — will treat the clone as a stranger.
