@@ -143,6 +143,23 @@ the images in `~/Desktop`, `~/Downloads`, `~/Pictures`, and the current folder
 one; a numbered menu otherwise). You can also type a path to an image kept
 elsewhere, or keep the original.
 
+Modern apps (Numbers, Pages, and other asset-catalog apps) load their icon from
+a compiled `Assets.car` via `CFBundleIconName`, which overrides a plain `.icns`.
+When you pass `--icon`, clowner drops that key so your `.icns` is used instead.
+
+## What about the name?
+
+The clone's name is rewritten in `Info.plist` **and** in every localized
+`Contents/Resources/*.lproj/InfoPlist.strings` — apps that localize their
+display name (again, the iWork apps, and many others) store it there, and that
+value wins over `Info.plist`, so without this the menu bar and Finder would keep
+the original name.
+
+macOS caches app names and icons. After cloning, if the old name or icon
+lingers, quit the app, then refresh: `touch "/Applications/<clone>.app"` and
+`killall Dock Finder`. A full re-register is `lsregister -f "/path/to.app"`
+(the tool lives deep under `/System/Library/Frameworks/CoreServices.framework`).
+
 ## Limitations
 
 **macOS only**

@@ -251,6 +251,11 @@ set_icon() {
   case "$iconkey" in *.icns) ;; *) iconkey="$iconkey.icns" ;; esac
   target="$clone/Contents/Resources/$iconkey"
 
+  # Modern apps load their icon from a compiled asset catalog (Assets.car) via
+  # CFBundleIconName, which overrides the .icns. Drop that key so our .icns wins.
+  # (The catalog stays in place; it just stops being the icon source.)
+  plist -c "Delete :CFBundleIconName" "$clone/Contents/Info.plist" 2>/dev/null || true
+
   case "$img" in
     *.icns|*.ICNS)
       cp "$img" "$target"
@@ -369,6 +374,21 @@ cmd_clone() {
 
   plist -c "Set :CFBundleName $name" "$dest/Contents/Info.plist" 2>/dev/null || true
   plist -c "Set :CFBundleDisplayName $name" "$dest/Contents/Info.plist" 2>/dev/null || true
+
+  # Many apps localize their display name in Contents/Resources/*.lproj/
+  # InfoPlist.strings, and that value WINS over Info.plist — so the menu bar and
+  # Finder keep showing the original name unless we rewrite these too.
+  local strings n=0
+  while IFS= read -r strings; do
+    local key changed=0
+    for key in CFBundleName CFBundleDisplayName; do
+      if plutil -extract "$key" raw "$strings" >/dev/null 2>&1; then
+        plutil -replace "$key" -string "$name" "$strings" >/dev/null 2>&1 && changed=1
+      fi
+    done
+    [ "$changed" -eq 1 ] && n=$((n+1))
+  done < <(find "$dest/Contents/Resources" -name InfoPlist.strings -type f 2>/dev/null)
+  [ "$n" -gt 0 ] && say "Renamed in $n localized InfoPlist.strings"
 
   if [ "$keep_updater" -eq 0 ]; then
     say "Stripping auto-update keys"
