@@ -77,6 +77,7 @@ clowner list          # every app clowner can see, with its type (chromium/firef
 | `--profile <path>` | isolation directory for the clone's instance |
 | `--args "<flags>"` | launch flags to run the clone as its own instance (any app) |
 | `--no-profile` | clone bare; share the original's data |
+| `--icon <file>` | give the clone a different icon (`.icns`, or any square image) |
 | `--keep-updater` | keep the Sparkle/Keystone auto-update keys |
 | `--force` | overwrite an existing destination |
 | `--yes` | skip the confirmation prompt |
@@ -120,6 +121,21 @@ window instead of handing off to the running one. There are three shapes:
    automatically for known families (Chromium: `--user-data-dir`, Firefox:
    `-no-remote --profile`).
 5. Clears quarantine attributes and re-signs with `codesign --force --deep --sign -`.
+
+## Changing the icon
+
+Clones share the original's icon, which makes them hard to tell apart. Pass
+`--icon` to give a clone its own:
+
+```sh
+clowner clone --src "/Applications/Brave Browser.app" --name me_bravo --icon ~/bravo.png
+```
+
+A `.icns` is used as-is; any other image (PNG, JPG, ...) is converted to a
+multi-resolution `.icns` — use a **square** image (1024×1024 is ideal). Because
+the icon lives inside the signed bundle, clowner swaps it *before* re-signing,
+so the clone stays valid. macOS caches icons aggressively; if the old one
+lingers, `touch` the app or relaunch Finder/Dock (`killall Finder Dock`).
 
 ## Limitations
 
