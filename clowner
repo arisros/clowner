@@ -1,0 +1,266 @@
+#!/usr/bin/env bash
+#
+# clowner — clone a macOS .app into a second, independent copy.
+#
+# Editing an app's Info.plist breaks its code signature, so the clone is
+# re-signed ad-hoc. That is what lets two copies of the same app coexist
+# with different bundle identifiers.
+
+set -euo pipefail
+
+VERSION="0.1.0"
+SEARCH_PATHS=("/Applications" "$HOME/Applications" "/Applications/Utilities")
+
+usage() {
+  cat <<'EOF'
+clowner — clone a macOS .app with a new bundle identifier
+
+Usage:
+  clowner                          Interactive wizard (pick an app, name the clone)
+  clowner clone --src <app> --name <name> [options]
+  clowner list                     List apps that can be cloned
+  clowner --version | --help
+
+Clone options:
+  --src <path>       Source .app bundle
+  --name <name>      Name of the clone, without .app
+  --id <bundle-id>   CFBundleIdentifier for the clone   (default: <name>)
+  --dest <path>      Where to write the clone           (default: /Applications/<name>.app)
+  --profile <path>   Run the clone with --user-data-dir=<path>
+                     (Chromium apps only; default: ~/Library/Application Support/Clowner/<name>)
+  --no-profile       Do not wrap the executable; the clone shares the original's data
+  --keep-updater     Keep Sparkle/Keystone auto-update keys (default: strip them)
+  --force            Overwrite an existing destination
+  --yes              Skip the confirmation prompt
+
+Notes:
+  * The clone is signed ad-hoc: no hardened runtime, no original team ID.
+  * The clone will not auto-update. Re-run clowner after the original updates.
+  * Cloning App Store or /System apps is unsupported; their signatures are not
+    reproducible ad-hoc and the copies usually refuse to launch.
+EOF
+}
+
+die() { printf 'clowner: %s\n' "$1" >&2; exit 1; }
+say() { printf '==> %s\n' "$1"; }
+
+plist() { /usr/libexec/PlistBuddy "$@"; }
+
+plist_get() {
+  plist -c "Print :$2" "$1/Contents/Info.plist" 2>/dev/null || true
+}
+
+# An app is Chromium-based if its framework ships the renderer helper.
+is_chromium() {
+  [ -n "$(find "$1/Contents/Frameworks" -maxdepth 5 -name '*Helper (Renderer).app' -print -quit 2>/dev/null)" ]
+}
+
+# ---------------------------------------------------------------- discovery
+
+list_apps() {
+  local dir app
+  for dir in "${SEARCH_PATHS[@]}"; do
+    [ -d "$dir" ] || continue
+    for app in "$dir"/*.app; do
+      [ -d "$app" ] || continue
+      [ -f "$app/Contents/Info.plist" ] || continue
+      printf '%s\n' "$app"
+    done
+  done
+}
+
+describe_app() {
+  local app="$1" id ver kind
+  id="$(plist_get "$app" CFBundleIdentifier)"
+  ver="$(plist_get "$app" CFBundleShortVersionString)"
+  kind="app"
+  is_chromium "$app" && kind="chromium"
+  printf '%-40s %-34s %-10s %s\n' "$(basename "$app" .app)" "${id:-?}" "${ver:-?}" "$kind"
+}
+
+cmd_list() {
+  printf '%-40s %-34s %-10s %s\n' "NAME" "BUNDLE ID" "VERSION" "TYPE"
+  local app
+  while IFS= read -r app; do describe_app "$app"; done < <(list_apps)
+}
+
+# ---------------------------------------------------------------- the wizard
+
+pick_app() {
+  local apps=() app
+  while IFS= read -r app; do apps+=("$app"); done < <(list_apps)
+  [ "${#apps[@]}" -gt 0 ] || die "no apps found in ${SEARCH_PATHS[*]}"
+
+  if command -v fzf >/dev/null 2>&1; then
+    printf '%s\n' "${apps[@]}" | fzf \
+      --prompt='clone which app? ' \
+      --height=60% --reverse --border \
+      --preview='/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" {}/Contents/Info.plist 2>/dev/null; /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" {}/Contents/Info.plist 2>/dev/null' \
+      --preview-window=down:3
+    return
+  fi
+
+  printf 'Pick an app to clone:\n' >&2
+  local choice
+  select choice in "${apps[@]}"; do
+    [ -n "${choice:-}" ] && { printf '%s\n' "$choice"; return; }
+  done
+}
+
+ask() { # ask <prompt> <default> -> stdout
+  local answer
+  read -r -p "$1 [$2]: " answer </dev/tty
+  printf '%s\n' "${answer:-$2}"
+}
+
+cmd_wizard() {
+  local src name id dest profile chromium="no"
+
+  src="$(pick_app </dev/tty)"
+  [ -n "$src" ] || die "nothing selected"
+  [ -d "$src" ] || die "not an app bundle: $src"
+
+  is_chromium "$src" && chromium="yes"
+
+  printf '\n  source:    %s\n' "$src"
+  printf '  bundle id: %s\n' "$(plist_get "$src" CFBundleIdentifier)"
+  printf '  chromium:  %s\n\n' "$chromium"
+
+  local base
+  base="$(basename "$src" .app | tr ' ' '_' | tr '[:upper:]' '[:lower:]')"
+  name="$(ask 'Name of the clone' "${base}_2")"
+  id="$(ask 'Bundle identifier' "$name")"
+  dest="$(ask 'Install to' "/Applications/$name.app")"
+
+  local args=(--src "$src" --name "$name" --id "$id" --dest "$dest")
+  if [ "$chromium" = "yes" ]; then
+    profile="$(ask 'Separate profile directory (- for none)' "$HOME/Library/Application Support/Clowner/$name")"
+    if [ "$profile" = "-" ]; then
+      args+=(--no-profile)
+    else
+      args+=(--profile "$profile")
+    fi
+  fi
+
+  printf '\n'
+  cmd_clone "${args[@]}"
+}
+
+# ---------------------------------------------------------------- the clone
+
+cmd_clone() {
+  local src="" name="" bundle_id="" dest="" profile="" old_id
+  local wrap=auto keep_updater=0 force=0 assume_yes=0
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --src) src="${2:-}"; shift 2 ;;
+      --name) name="${2:-}"; shift 2 ;;
+      --id) bundle_id="${2:-}"; shift 2 ;;
+      --dest) dest="${2:-}"; shift 2 ;;
+      --profile) profile="${2:-}"; wrap=yes; shift 2 ;;
+      --no-profile) wrap=no; shift ;;
+      --keep-updater) keep_updater=1; shift ;;
+      --force) force=1; shift ;;
+      --yes|-y) assume_yes=1; shift ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown argument: $1" ;;
+    esac
+  done
+
+  [ -n "$src" ] || die "--src is required"
+  [ -n "$name" ] || die "--name is required"
+  [ -d "$src" ] && [ -f "$src/Contents/Info.plist" ] || die "not an app bundle: $src"
+
+  bundle_id="${bundle_id:-$name}"
+  dest="${dest:-/Applications/$name.app}"
+  old_id="$(plist -c 'Print :CFBundleIdentifier' "$src/Contents/Info.plist")"
+
+  if [ "$wrap" = auto ]; then
+    if is_chromium "$src"; then wrap=yes; else wrap=no; fi
+  fi
+  if [ "$wrap" = yes ]; then
+    profile="${profile:-$HOME/Library/Application Support/Clowner/$name}"
+    is_chromium "$src" || die "--profile needs a Chromium-based app (no --user-data-dir elsewhere)"
+  fi
+
+  if [ -e "$dest" ] && [ "$force" -eq 0 ]; then
+    die "destination exists: $dest (use --force to overwrite)"
+  fi
+
+  printf '  %-11s %s\n' "source:" "$src"
+  printf '  %-11s %s\n' "clone:" "$dest"
+  printf '  %-11s %s -> %s\n' "bundle id:" "$old_id" "$bundle_id"
+  [ "$wrap" = yes ] && printf '  %-11s %s\n' "profile:" "$profile"
+  printf '\n'
+
+  if [ "$assume_yes" -eq 0 ]; then
+    local go
+    read -r -p "Proceed? [y/N]: " go </dev/tty
+    case "$go" in y|Y|yes|YES) ;; *) die "aborted" ;; esac
+  fi
+
+  [ -e "$dest" ] && { say "Removing $dest"; rm -rf "$dest"; }
+
+  say "Copying"
+  mkdir -p "$(dirname "$dest")"
+  cp -a "$src" "$dest"
+
+  say "Rewriting bundle identifiers ($old_id -> $bundle_id)"
+  local info id new_id
+  while IFS= read -r info; do
+    id="$(plist -c 'Print :CFBundleIdentifier' "$info" 2>/dev/null)" || continue
+    case "$id" in
+      "$old_id"|"$old_id".*)
+        new_id="$bundle_id${id#"$old_id"}"
+        plist -c "Set :CFBundleIdentifier $new_id" "$info"
+        printf '    %s -> %s\n' "$id" "$new_id"
+        ;;
+    esac
+  done < <(find "$dest" -name Info.plist -type f)
+
+  plist -c "Set :CFBundleName $name" "$dest/Contents/Info.plist" 2>/dev/null || true
+  plist -c "Set :CFBundleDisplayName $name" "$dest/Contents/Info.plist" 2>/dev/null || true
+
+  if [ "$keep_updater" -eq 0 ]; then
+    say "Stripping auto-update keys"
+    local key
+    for key in KSProductID KSUpdateURL KSVersion KSChannelID SUFeedURL SUEnableAutomaticChecks; do
+      plist -c "Delete :$key" "$dest/Contents/Info.plist" 2>/dev/null || true
+    done
+  fi
+
+  if [ "$wrap" = yes ]; then
+    say "Pinning the clone to $profile"
+    local exe bin_dir real
+    exe="$(plist -c 'Print :CFBundleExecutable' "$dest/Contents/Info.plist")"
+    bin_dir="$dest/Contents/MacOS"
+    real="$exe-clowner"
+    mv "$bin_dir/$exe" "$bin_dir/$real"
+    cat > "$bin_dir/$exe" <<EOF
+#!/bin/sh
+# Generated by clowner — keeps this clone on its own profile.
+exec "\$(dirname "\$0")/$real" --user-data-dir="$profile" "\$@"
+EOF
+    chmod +x "$bin_dir/$exe"
+  fi
+
+  say "Signing ad-hoc"
+  xattr -cr "$dest" 2>/dev/null || true
+  codesign --force --deep --sign - "$dest"
+
+  say "Done"
+  codesign -dv "$dest" 2>&1 | grep -E 'Identifier=|Signature=' | sed 's/^/    /' || true
+  printf '    run: open -a "%s"\n' "$dest"
+}
+
+# ---------------------------------------------------------------- entrypoint
+
+case "${1:-}" in
+  "")           cmd_wizard ;;
+  clone)        shift; cmd_clone "$@" ;;
+  list)         cmd_list ;;
+  -h|--help)    usage ;;
+  --version|-V) printf 'clowner %s\n' "$VERSION" ;;
+  *)            die "unknown command: $1 (try --help)" ;;
+esac
