@@ -2,6 +2,7 @@
 #
 # clowner — clone a macOS .app into a second, independent copy.
 #
+# macOS only: built on .app bundles, Info.plist, codesign, and PlistBuddy.
 # Editing an app's Info.plist breaks its code signature, so the clone is
 # re-signed ad-hoc. That is what lets two copies of the same app coexist
 # with different bundle identifiers.
