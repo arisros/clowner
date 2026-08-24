@@ -11,14 +11,28 @@ original code signature, so `clowner` re-signs the clone ad-hoc.
 
 ## Install
 
+One line — no clone, no build:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/arisros/clowner/main/install.sh | sh
+```
+
+This drops the `clowner` script on your PATH (`/usr/local/bin` if writable, else
+`~/.local/bin`; override with `PREFIX=…` or `BINDIR=…`). clowner is a single
+Bash script that calls the macOS tools already on your Mac (`codesign`,
+`PlistBuddy`) — there is no runtime to install and nothing compiled.
+
+Or grab it by hand:
+
 ```sh
 git clone https://github.com/arisros/clowner.git
 ln -s "$PWD/clowner/clowner" /usr/local/bin/clowner
 ```
 
-Requires macOS with the Xcode command line tools (for `codesign`).
-[`fzf`](https://github.com/junegunn/fzf) is optional — with it the picker is
-fuzzy-searchable, without it you get a numbered menu.
+Requires macOS with the Xcode command line tools (for `codesign`; install with
+`xcode-select --install`). Runs on the stock `/bin/bash` (3.2) — no newer Bash
+needed. [`fzf`](https://github.com/junegunn/fzf) is optional — with it the app
+picker is fuzzy-searchable, without it you get a numbered menu.
 
 ## Use
 
