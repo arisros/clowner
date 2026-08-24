@@ -129,6 +129,56 @@ pick_app() {
   done
 }
 
+ICON_EXTS='png|jpg|jpeg|icns|tiff|tif|heic|gif|bmp|webp'
+ICON_DIRS=("$HOME/Desktop" "$HOME/Downloads" "$HOME/Pictures" "$PWD")
+
+# Echo a chosen icon image path, or nothing to keep the original. Lists image
+# files from a few common folders; fzf when available, numbered menu otherwise.
+# In both, you can type a path directly for an image that lives elsewhere.
+pick_icon() {
+  local imgs=() f
+  while IFS= read -r f; do imgs+=("$f"); done < <(
+    find "${ICON_DIRS[@]}" -maxdepth 2 -type f 2>/dev/null \
+      | grep -iE "\.($ICON_EXTS)\$" | sort -u
+  )
+
+  if command -v fzf >/dev/null 2>&1; then
+    local out query choice
+    out="$( { printf '%s\n' '— keep original icon —'; \
+              if [ "${#imgs[@]}" -gt 0 ]; then printf '%s\n' "${imgs[@]}"; fi; } | fzf \
+      --prompt='icon (pick, or type a path): ' --print-query --height=60% --reverse --border \
+      --preview='sips -g pixelWidth -g pixelHeight {} 2>/dev/null | tail -2' \
+      --preview-window=down:3 )"
+    query="$(printf '%s\n' "$out" | sed -n 1p)"
+    choice="$(printf '%s\n' "$out" | sed -n 2p)"
+    if [ -n "$choice" ] && [ "$choice" != '— keep original icon —' ]; then
+      printf '%s\n' "$choice"
+    elif [ -n "$query" ]; then
+      printf '%s\n' "$query"   # typed path with no list match
+    fi
+    return
+  fi
+
+  # No fzf: numbered menu of found images, plus manual entry / keep.
+  if [ "${#imgs[@]}" -eq 0 ]; then
+    local p
+    read -r -p "Icon image path (blank to keep original): " p </dev/tty
+    [ -n "$p" ] && printf '%s\n' "$p"
+    return
+  fi
+  printf 'Choose an icon:\n' >&2
+  local choice
+  select choice in "${imgs[@]}" "Type a path…" "Keep original icon"; do
+    case "$choice" in
+      "Keep original icon"|"") return ;;
+      "Type a path…")
+        read -r -p "Icon image path: " choice </dev/tty
+        [ -n "$choice" ] && printf '%s\n' "$choice"; return ;;
+      *) printf '%s\n' "$choice"; return ;;
+    esac
+  done
+}
+
 ask() { # ask <prompt> <default> -> stdout
   local answer
   read -r -p "$1 [$2]: " answer </dev/tty
@@ -165,8 +215,8 @@ cmd_wizard() {
   fi
 
   local icon
-  icon="$(ask 'Icon image (- to keep original)' '-')"
-  [ "$icon" = "-" ] || args+=(--icon "$icon")
+  icon="$(pick_icon </dev/tty)"
+  [ -n "$icon" ] && args+=(--icon "$icon")
 
   printf '\n'
   cmd_clone "${args[@]}"

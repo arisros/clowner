@@ -137,6 +137,12 @@ the icon lives inside the signed bundle, clowner swaps it *before* re-signing,
 so the clone stays valid. macOS caches icons aggressively; if the old one
 lingers, `touch` the app or relaunch Finder/Dock (`killall Finder Dock`).
 
+The wizard (run `clowner` with no arguments) offers an icon picker: it lists
+the images in `~/Desktop`, `~/Downloads`, `~/Pictures`, and the current folder
+(fzf when available, showing each image's dimensions so you can spot a square
+one; a numbered menu otherwise). You can also type a path to an image kept
+elsewhere, or keep the original.
+
 ## Limitations
 
 **macOS only**
