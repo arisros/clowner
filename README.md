@@ -60,8 +60,9 @@ clowner list          # every app clowner can see, and whether it is Chromium-ba
 | `--name <name>` | name of the clone, without `.app` |
 | `--id <bundle-id>` | identifier for the clone (default: the name) |
 | `--dest <path>` | where to write it (default: `/Applications/<name>.app`) |
-| `--profile <path>` | run the clone with `--user-data-dir=<path>` (Chromium apps) |
-| `--no-profile` | share the original's data instead |
+| `--profile <path>` | isolation directory for the clone's instance |
+| `--args "<flags>"` | launch flags to run the clone as its own instance (any app) |
+| `--no-profile` | clone bare; share the original's data |
 | `--keep-updater` | keep the Sparkle/Keystone auto-update keys |
 | `--force` | overwrite an existing destination |
 | `--yes` | skip the confirmation prompt |
@@ -75,10 +76,12 @@ clowner list          # every app clowner can see, and whether it is Chromium-ba
    bundles alone.
 3. Strips the auto-update keys (`KSProductID`, `SUFeedURL`, …) so the clone
    does not fight the original's updater.
-4. For Chromium apps, replaces `Contents/MacOS/<exe>` with a two-line wrapper
-   that execs the real binary with `--user-data-dir=<profile>`. Without this a
-   second copy just hands off to the already-running instance instead of
-   opening its own window, and both copies share one profile.
+4. If the clone needs to run as its own instance, replaces `Contents/MacOS/<exe>`
+   with a two-line wrapper that execs the real binary with isolation flags.
+   Without this a second copy of a browser just hands off to the already-running
+   instance instead of opening its own window. The flags are generic — pass any
+   with `--args "..."` — and filled in automatically for known families
+   (Chromium: `--user-data-dir`, Firefox: `-no-remote --profile`).
 5. Clears quarantine attributes and re-signs with `codesign --force --deep --sign -`.
 
 ## Caveats

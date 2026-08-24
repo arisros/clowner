@@ -26,8 +26,11 @@ Clone options:
   --name <name>      Name of the clone, without .app
   --id <bundle-id>   CFBundleIdentifier for the clone   (default: <name>)
   --dest <path>      Where to write the clone           (default: /Applications/<name>.app)
-  --profile <path>   Run the clone with --user-data-dir=<path>
-                     (Chromium apps only; default: ~/Library/Application Support/Clowner/<name>)
+  --profile <path>   Isolation directory for the clone's instance
+                     (default: ~/Library/Application Support/Clowner/<name>)
+  --args "<flags>"   Launch flags to run the clone as its own instance. Set
+                     automatically for known browsers (Chromium: --user-data-dir,
+                     Firefox: -no-remote --profile); pass this for anything else.
   --no-profile       Do not wrap the executable; the clone shares the original's data
   --keep-updater     Keep Sparkle/Keystone auto-update keys (default: strip them)
   --force            Overwrite an existing destination
@@ -53,6 +56,22 @@ plist_get() {
 # An app is Chromium-based if its framework ships the renderer helper.
 is_chromium() {
   [ -n "$(find "$1/Contents/Frameworks" -maxdepth 5 -name '*Helper (Renderer).app' -print -quit 2>/dev/null)" ]
+}
+
+# A Firefox/Gecko app: Mozilla bundle id, or an XUL framework alongside it.
+is_firefox() {
+  case "$(plist_get "$1" CFBundleIdentifier)" in
+    org.mozilla.*|org.torproject.*) return 0 ;;
+  esac
+  [ -e "$1/Contents/MacOS/firefox" ] || [ -d "$1/Contents/MacOS/XUL.framework" ]
+}
+
+# Which per-instance isolation a clone needs: a browser family that would
+# otherwise hand a second copy off to the already-running instance.
+app_family() {
+  if is_chromium "$1"; then echo chromium
+  elif is_firefox "$1"; then echo firefox
+  else echo other; fi
 }
 
 # ---------------------------------------------------------------- discovery
@@ -114,17 +133,17 @@ ask() { # ask <prompt> <default> -> stdout
 }
 
 cmd_wizard() {
-  local src name id dest profile chromium="no"
+  local src name id dest profile family
 
   src="$(pick_app </dev/tty)"
   [ -n "$src" ] || die "nothing selected"
   [ -d "$src" ] || die "not an app bundle: $src"
 
-  is_chromium "$src" && chromium="yes"
+  family="$(app_family "$src")"
 
   printf '\n  source:    %s\n' "$src"
   printf '  bundle id: %s\n' "$(plist_get "$src" CFBundleIdentifier)"
-  printf '  chromium:  %s\n\n' "$chromium"
+  printf '  type:      %s\n\n' "$family"
 
   local base
   base="$(basename "$src" .app | tr ' ' '_' | tr '[:upper:]' '[:lower:]')"
@@ -133,7 +152,7 @@ cmd_wizard() {
   dest="$(ask 'Install to' "/Applications/$name.app")"
 
   local args=(--src "$src" --name "$name" --id "$id" --dest "$dest")
-  if [ "$chromium" = "yes" ]; then
+  if [ "$family" != "other" ]; then
     profile="$(ask 'Separate profile directory (- for none)' "$HOME/Library/Application Support/Clowner/$name")"
     if [ "$profile" = "-" ]; then
       args+=(--no-profile)
@@ -167,7 +186,7 @@ resign_adhoc() {
 
 cmd_clone() {
   local src="" name="" bundle_id="" dest="" profile="" old_id
-  local wrap=auto keep_updater=0 force=0 assume_yes=0
+  local wrap=auto wrap_args="" wrap_args_set=0 keep_updater=0 force=0 assume_yes=0
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -176,6 +195,7 @@ cmd_clone() {
       --id) bundle_id="${2:-}"; shift 2 ;;
       --dest) dest="${2:-}"; shift 2 ;;
       --profile) profile="${2:-}"; wrap=yes; shift 2 ;;
+      --args) wrap_args="${2:-}"; wrap_args_set=1; wrap=yes; shift 2 ;;
       --no-profile) wrap=no; shift ;;
       --keep-updater) keep_updater=1; shift ;;
       --force) force=1; shift ;;
@@ -193,12 +213,28 @@ cmd_clone() {
   dest="${dest:-/Applications/$name.app}"
   old_id="$(plist -c 'Print :CFBundleIdentifier' "$src/Contents/Info.plist")"
 
+  local family
+  family="$(app_family "$src")"
+
+  # Whether to wrap the executable so the clone runs as its own instance. The
+  # core clone (copy + re-id + re-sign) is generic; wrapping is an optional
+  # add-on. It auto-enables only for browser families that would otherwise hand
+  # a second copy off to the running one — everything else clones bare unless
+  # you ask for a wrapper with --args.
   if [ "$wrap" = auto ]; then
-    if is_chromium "$src"; then wrap=yes; else wrap=no; fi
+    if [ "$family" = "other" ]; then wrap=no; else wrap=yes; fi
   fi
   if [ "$wrap" = yes ]; then
     profile="${profile:-$HOME/Library/Application Support/Clowner/$name}"
-    is_chromium "$src" || die "--profile needs a Chromium-based app (no --user-data-dir elsewhere)"
+    # Flags that give the clone a separate instance. Supplied generically with
+    # --args (any app), or filled in from a known browser family as a default.
+    if [ "$wrap_args_set" -eq 0 ]; then
+      case "$family" in
+        chromium) wrap_args="--user-data-dir=\"$profile\"" ;;
+        firefox)  wrap_args="-no-remote --profile \"$profile\"" ;;
+        *) die "don't know how to isolate a '$family' app — pass the launch flags yourself with --args \"...\", or --no-profile to clone bare" ;;
+      esac
+    fi
   fi
 
   if [ -e "$dest" ] && [ "$force" -eq 0 ]; then
@@ -208,7 +244,7 @@ cmd_clone() {
   printf '  %-11s %s\n' "source:" "$src"
   printf '  %-11s %s\n' "clone:" "$dest"
   printf '  %-11s %s -> %s\n' "bundle id:" "$old_id" "$bundle_id"
-  [ "$wrap" = yes ] && printf '  %-11s %s\n' "profile:" "$profile"
+  [ "$wrap" = yes ] && printf '  %-11s %s\n' "wrap:" "$wrap_args"
   printf '\n'
 
   if [ "$assume_yes" -eq 0 ]; then
@@ -248,16 +284,17 @@ cmd_clone() {
   fi
 
   if [ "$wrap" = yes ]; then
-    say "Pinning the clone to $profile"
+    say "Wrapping the executable ($wrap_args)"
     local exe bin_dir real
     exe="$(plist -c 'Print :CFBundleExecutable' "$dest/Contents/Info.plist")"
     bin_dir="$dest/Contents/MacOS"
     real="$exe-clowner"
+    [ -n "$profile" ] && mkdir -p "$profile"
     mv "$bin_dir/$exe" "$bin_dir/$real"
     cat > "$bin_dir/$exe" <<EOF
 #!/bin/sh
-# Generated by clowner — keeps this clone on its own profile.
-exec "\$(dirname "\$0")/$real" --user-data-dir="$profile" "\$@"
+# Generated by clowner — runs the clone as its own instance.
+exec "\$(dirname "\$0")/$real" $wrap_args "\$@"
 EOF
     chmod +x "$bin_dir/$exe"
   fi
