@@ -1,11 +1,4 @@
 #!/usr/bin/env bash
-#
-# clowner — clone a macOS .app into a second, independent copy.
-#
-# macOS only: built on .app bundles, Info.plist, codesign, and PlistBuddy.
-# Editing an app's Info.plist breaks its code signature, so the clone is
-# re-signed ad-hoc. That is what lets two copies of the same app coexist
-# with different bundle identifiers.
 
 set -euo pipefail
 
@@ -63,8 +56,6 @@ plist_get() {
   plist -c "Print :$2" "$1/Contents/Info.plist" 2>/dev/null || true
 }
 
-# read does not expand ~, and a path dragged into a terminal arrives quoted or
-# backslash-escaped. Echo a usable path, or nothing if none of the readings exist.
 resolve_path() {
   local raw="$1" p
   for p in "$raw" "$(printf '%s' "$raw" | sed "s/^['\"]//; s/['\"]\$//")" "$(printf '%s' "$raw" | sed 's/\\ / /g')"; do
@@ -77,12 +68,10 @@ resolve_path() {
   return 0
 }
 
-# An app is Chromium-based if its framework ships the renderer helper.
 is_chromium() {
   [ -n "$(find "$1/Contents/Frameworks" -maxdepth 5 -name '*Helper (Renderer).app' -print -quit 2>/dev/null)" ]
 }
 
-# A Firefox/Gecko app: Mozilla bundle id, or an XUL framework alongside it.
 is_firefox() {
   case "$(plist_get "$1" CFBundleIdentifier)" in
     org.mozilla.*|org.torproject.*) return 0 ;;
@@ -90,8 +79,6 @@ is_firefox() {
   [ -e "$1/Contents/MacOS/firefox" ] || [ -d "$1/Contents/MacOS/XUL.framework" ]
 }
 
-# Which per-instance isolation a clone needs: a browser family that would
-# otherwise hand a second copy off to the already-running instance.
 app_family() {
   if is_chromium "$1"; then echo chromium
   elif is_firefox "$1"; then echo firefox
@@ -101,8 +88,6 @@ app_family() {
 app_running() {
   pgrep -f "$1/Contents/MacOS/" >/dev/null 2>&1
 }
-
-# ---------------------------------------------------------------- discovery
 
 list_apps() {
   local dir app
@@ -131,10 +116,6 @@ cmd_list() {
   while IFS= read -r app; do describe_app "$app"; done < <(list_apps)
 }
 
-# ------------------------------------------------- the original's own profile
-
-# Firefox keeps its profiles under a per-app support directory listed nowhere in
-# Info.plist; map the known forks, fall back to the bundle name.
 firefox_root() {
   case "$(plist_get "$1" CFBundleIdentifier)" in
     org.mozilla.firefox|org.mozilla.firefoxdeveloperedition|org.mozilla.nightly)
@@ -146,8 +127,6 @@ firefox_root() {
   esac
 }
 
-# The profile directory Firefox itself would open: the one flagged Default=1 in
-# profiles.ini, else the install's Default=, else the first listed.
 firefox_default_profile() {
   local root ini path
   root="$(firefox_root "$1")"
@@ -166,9 +145,6 @@ firefox_default_profile() {
   return 0
 }
 
-# Where the ORIGINAL app keeps the data a clone could start from. Chromium
-# records its own directory in Info.plist (CrProductDirName); older builds and
-# Chrome itself do not, so the well-known ones are listed.
 source_data_dir() {
   local app="$1" family="$2" dir name
   case "$family" in
@@ -202,8 +178,7 @@ source_data_dir() {
   return 0
 }
 
-# Caches, crash dumps and single-instance locks: regenerated on first launch,
-# and a copied lock makes the clone think it is already running.
+# Rebuilt on first launch; a copied lock makes the clone think it is running.
 SEED_SKIP=(
   Cache "Code Cache" GPUCache DawnCache DawnGraphiteCache DawnWebGPUCache
   GrShaderCache ShaderCache CacheStorage "Service Worker/CacheStorage"
@@ -218,11 +193,9 @@ seed_profile() {
   for x in "${SEED_SKIP[@]}"; do skip+=(--exclude "$x"); done
   mkdir -p "$to"
   rsync -a "${skip[@]}" "$from/" "$to/" || status=$?
-  # 24: source files vanished mid-copy (the original was running). Harmless.
+  # 24: files vanished mid-copy because the original was running.
   [ "$status" -eq 0 ] || [ "$status" -eq 24 ] || die "could not copy $from (rsync exit $status)"
 }
-
-# ---------------------------------------------------------------- the wizard
 
 pick_app() {
   local apps=() app
@@ -249,9 +222,6 @@ ICON_EXTS='png|jpg|jpeg|icns|tiff|tif|heic|gif|bmp|webp'
 ICON_DIRS=("$HOME/Desktop" "$HOME/Downloads" "$HOME/Pictures" "$PWD")
 ICON_KEEP='keep the original icon'
 
-# Echo a chosen icon image path, or nothing to keep the original. Lists image
-# files from a few common folders; fzf when available, numbered menu otherwise.
-# In both, you can type a path directly for an image that lives elsewhere.
 pick_icon() {
   local imgs=() f
   while IFS= read -r f; do imgs+=("$f"); done < <(
@@ -298,8 +268,6 @@ pick_icon() {
   done
 }
 
-# Echo the image if it exists; otherwise say so, loudly, and echo nothing. A
-# typo used to disappear here and the clone came out with the original's icon.
 validated_icon() {
   local p
   p="$(resolve_path "$1")"
@@ -369,27 +337,14 @@ cmd_wizard() {
   cmd_clone "${args[@]}"
 }
 
-# ---------------------------------------------------------------- signing
-
 resign_adhoc() {
   local clone="$1"
 
-  # Ad-hoc deep sign, dropping all entitlements. This is deliberate, not a
-  # shortcut: the original app's entitlements (application-identifier,
-  # keychain-access-groups, com.apple.developer.*) are scoped to the vendor's
-  # Team ID. An ad-hoc signature has no team, so a process that CLAIMS them
-  # cannot prove them and taskgated kills it at launch. Carrying them over was
-  # tested and makes the clone exit immediately. Dropping them keeps the clone
-  # launchable; the visible cost is a one-time keychain-access prompt on first
-  # run (click "Always Allow"), because the clone is a new signing identity and
-  # cannot silently reuse the original's keychain items.
+  # Entitlements are dropped on purpose: they are scoped to the vendor's Team ID,
+  # an ad-hoc signature has none, and taskgated kills a process that claims them.
   codesign --force --deep --sign - "$clone" >/dev/null 2>&1
 }
 
-# Replace the clone's icon with $img. The icon lives inside Contents/Resources
-# and is sealed by the signature, so this must run BEFORE resign_adhoc. An .icns
-# is used as-is; any other image is converted to a multi-resolution .icns via an
-# iconset (falling back to a single sips conversion).
 set_icon() {
   local clone="$1" img="$2"
   local info="$clone/Contents/Info.plist" iconkey target
@@ -398,12 +353,8 @@ set_icon() {
   case "$iconkey" in *.icns) ;; *) iconkey="$iconkey.icns" ;; esac
   target="$clone/Contents/Resources/$iconkey"
 
-  # Modern apps load their icon from a compiled asset catalog (Assets.car) via
-  # CFBundleIconName, which overrides the .icns. Drop that key so our .icns wins.
-  # (The catalog stays in place; it just stops being the icon source.)
+  # CFBundleIconName points at Assets.car and overrides the .icns.
   plist -c "Delete :CFBundleIconName" "$info" 2>/dev/null || true
-  # An app with no CFBundleIconFile at all (icon only in the catalog) needs the
-  # key added, or nothing points at the file we just wrote.
   plist -c "Set :CFBundleIconFile $iconkey" "$info" 2>/dev/null \
     || plist -c "Add :CFBundleIconFile string $iconkey" "$info" 2>/dev/null || true
 
@@ -416,13 +367,11 @@ set_icon() {
       local set_dir sz
       set_dir="$(mktemp -d "${TMPDIR:-/tmp}/clowner-icon.XXXXXX")/icon.iconset"
       mkdir -p "$set_dir"
-      # Standard iconset sizes (1x and 2x). Any that fail are skipped.
       for sz in 16 32 128 256 512; do
         sips -s format png -z "$sz" "$sz" "$img" --out "$set_dir/icon_${sz}x${sz}.png" >/dev/null 2>&1 || true
         sips -s format png -z $((sz*2)) $((sz*2)) "$img" --out "$set_dir/icon_${sz}x${sz}@2x.png" >/dev/null 2>&1 || true
       done
       if ! iconutil -c icns "$set_dir" -o "$target" >/dev/null 2>&1; then
-        # Fallback: single-shot conversion (lower quality, but works).
         sips -s format icns "$img" --out "$target" >/dev/null 2>&1 \
           || die "could not convert $img to .icns"
       fi
@@ -432,8 +381,7 @@ set_icon() {
   [ -s "$target" ] || die "icon conversion produced an empty $iconkey from $img"
 }
 
-# macOS caches icons and names per bundle path, so a fresh clone at a path that
-# held an older one shows the old icon until Launch Services is told otherwise.
+# macOS caches icons and names per bundle path.
 refresh_launch_services() {
   local app="$1"
   local lsr=/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister
@@ -441,8 +389,6 @@ refresh_launch_services() {
   [ -x "$lsr" ] && "$lsr" -f "$app" >/dev/null 2>&1
   return 0
 }
-
-# ---------------------------------------------------------------- the clone
 
 cmd_clone() {
   local src="" name="" bundle_id="" dest="" profile="" old_id icon=""
@@ -484,18 +430,11 @@ cmd_clone() {
   local family
   family="$(app_family "$src")"
 
-  # Whether to wrap the executable so the clone runs as its own instance. The
-  # core clone (copy + re-id + re-sign) is generic; wrapping is an optional
-  # add-on. It auto-enables only for browser families that would otherwise hand
-  # a second copy off to the running one — everything else clones bare unless
-  # you ask for a wrapper with --args.
   if [ "$wrap" = auto ]; then
     if [ "$family" = "other" ]; then wrap=no; else wrap=yes; fi
   fi
   if [ "$wrap" = yes ]; then
     profile="${profile:-$SUPPORT/Clowner/$name}"
-    # Flags that give the clone a separate instance. Supplied generically with
-    # --args (any app), or filled in from a known browser family as a default.
     if [ "$wrap_args_set" -eq 0 ]; then
       case "$family" in
         chromium) wrap_args="--user-data-dir=\"$profile\"" ;;
@@ -565,9 +504,7 @@ cmd_clone() {
   plist -c "Set :CFBundleName $name" "$dest/Contents/Info.plist" 2>/dev/null || true
   plist -c "Set :CFBundleDisplayName $name" "$dest/Contents/Info.plist" 2>/dev/null || true
 
-  # Many apps localize their display name in Contents/Resources/*.lproj/
-  # InfoPlist.strings, and that value WINS over Info.plist — so the menu bar and
-  # Finder keep showing the original name unless we rewrite these too.
+  # A localized name in InfoPlist.strings wins over Info.plist.
   local strings n=0
   while IFS= read -r strings; do
     local key changed=0
@@ -616,10 +553,8 @@ EOF
   say "Refreshing Launch Services"
   refresh_launch_services "$dest"
 
-  # Last, deliberately. Between the copy and the re-sign the bundle is a browser
-  # with a broken signature sitting in /Applications, and seeding a multi-GB
-  # profile keeps it in that state for minutes; endpoint security software has
-  # been observed deleting it in that window. Signing first closes it.
+  # After signing: a multi-GB seed would otherwise leave a broken-signature
+  # bundle in /Applications for minutes, which endpoint security deletes.
   if [ "$seed" -eq 1 ]; then
     say "Seeding profile from $seed_from"
     seed_profile "$seed_from" "$profile"
@@ -631,8 +566,6 @@ EOF
   [ -n "$icon" ] && printf '    if the old icon lingers: killall Dock Finder\n'
   return 0
 }
-
-# ---------------------------------------------------------------- entrypoint
 
 case "${1:-}" in
   "")           cmd_wizard ;;
