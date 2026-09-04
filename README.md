@@ -57,6 +57,14 @@ Name of the clone [brave_browser_2]: me_bravo
 Bundle identifier [me_bravo]:
 Install to [/Applications/me_bravo.app]:
 Separate profile directory (- for none) [~/Library/Application Support/Clowner/me_bravo]:
+
+  Brave Browser keeps its data in:
+    /Users/you/Library/Application Support/BraveSoftware/Brave-Browser
+  Copying it gives the clone the same bookmarks, extensions and logins.
+  Start the clone from a copy of that data? [y/N]:
+
+icon (pick one, or type a path): bravo
+> /Users/you/Desktop/bravo.png
 ```
 
 Or skip the wizard:
@@ -77,6 +85,8 @@ clowner list          # every app clowner can see, with its type (chromium/firef
 | `--profile <path>` | isolation directory for the clone's instance |
 | `--args "<flags>"` | launch flags to run the clone as its own instance (any app) |
 | `--no-profile` | clone bare; share the original's data |
+| `--seed` | start the clone's profile from a copy of the original's data |
+| `--seed-from <dir>` | seed from this directory instead of the detected one |
 | `--icon <file>` | give the clone a different icon (`.icns`, or any square image) |
 | `--keep-updater` | keep the Sparkle/Keystone auto-update keys |
 | `--force` | overwrite an existing destination |
@@ -120,7 +130,11 @@ window instead of handing off to the running one. There are three shapes:
    The flags are generic — pass any with `--args "..."` — and filled in
    automatically for known families (Chromium: `--user-data-dir`, Firefox:
    `-no-remote --profile`).
-5. Clears quarantine attributes and re-signs with `codesign --force --deep --sign -`.
+5. With `--seed`, fills that profile with a copy of the original's own data,
+   skipping caches, crash dumps and the single-instance locks.
+6. Clears quarantine attributes and re-signs with `codesign --force --deep --sign -`,
+   then re-registers the bundle with Launch Services so the new name and icon
+   take effect.
 
 ## Changing the icon
 
@@ -134,18 +148,52 @@ clowner clone --src "/Applications/Brave Browser.app" --name me_bravo --icon ~/b
 A `.icns` is used as-is; any other image (PNG, JPG, ...) is converted to a
 multi-resolution `.icns` — use a **square** image (1024×1024 is ideal). Because
 the icon lives inside the signed bundle, clowner swaps it *before* re-signing,
-so the clone stays valid. macOS caches icons aggressively; if the old one
-lingers, `touch` the app or relaunch Finder/Dock (`killall Finder Dock`).
+so the clone stays valid. clowner re-registers the finished bundle with Launch
+Services; macOS still caches icons aggressively, so if the old one lingers,
+relaunch Finder and the Dock (`killall Finder Dock`).
 
 The wizard (run `clowner` with no arguments) offers an icon picker: it lists
 the images in `~/Desktop`, `~/Downloads`, `~/Pictures`, and the current folder
 (fzf when available, showing each image's dimensions so you can spot a square
 one; a numbered menu otherwise). You can also type a path to an image kept
-elsewhere, or keep the original.
+elsewhere, or keep the original. A path that does not exist is reported rather
+than ignored, and escaping the picker keeps the original icon.
 
 Modern apps (Numbers, Pages, and other asset-catalog apps) load their icon from
 a compiled `Assets.car` via `CFBundleIconName`, which overrides a plain `.icns`.
 When you pass `--icon`, clowner drops that key so your `.icns` is used instead.
+
+## Starting from the original's data
+
+A clone starts empty: no bookmarks, no extensions, signed out of everything.
+`--seed` starts it from a copy of the original's profile instead, which is what
+you want when the clone is meant to be the same browser with a different skin
+and a separate session rather than a blank one.
+
+```sh
+clowner clone --src "/Applications/Brave Browser.app" --name me_bravo --seed
+```
+
+clowner finds the original's data on its own. Chromium apps record the location
+in `Info.plist` (`CrProductDirName`), so Brave, Chrome, Edge, Vivaldi, Arc and
+Electron apps resolve without help; Firefox and its forks are read out of
+`profiles.ini`, taking the profile the browser itself would open. Pass
+`--seed-from <dir>` when you want a different one (a second Firefox profile, an
+old backup).
+
+Caches, crash dumps and single-instance locks are skipped: they are rebuilt on
+first launch, and a copied lock makes the clone think it is already running.
+Everything else is copied, so expect the clone's profile to be roughly the size
+of the original's (`du -sh` it first: a daily-driver Chromium profile is easily
+a few GB).
+
+**Quit the original first.** Its databases are copied file by file, and a
+browser that is running will be mid-write in some of them.
+
+Passwords and cookies are encrypted with a key in the login keychain. The clone
+is a different signing identity, so macOS asks before it may use that key on
+first launch: click **Always Allow** and the seeded logins work. Deny it and the
+clone keeps the profile but resets its saved passwords and cookies.
 
 ## What about the name?
 
@@ -200,6 +248,14 @@ lingers, quit the app, then refresh: `touch "/Applications/<clone>.app"` and
   clone is a different id, so those rules don't apply to it. Depending on the
   setup that means the clone is blocked from the network, or slips past controls
   meant to cover the browser — worth checking before relying on a clone at work.
+
+**Seeded clones**
+
+- A seeded clone is a *copy* made at one moment, not a sync. From then on the
+  two profiles drift apart; nothing written in one shows up in the other.
+- Extensions come across, but ones tied to a device or an account may ask to be
+  re-authorized, and anything the original registered with a service by bundle
+  id (push notifications, native messaging hosts) does not follow the clone.
 
 **Shared state**
 

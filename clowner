@@ -9,8 +9,9 @@
 
 set -euo pipefail
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 SEARCH_PATHS=("/Applications" "$HOME/Applications" "/Applications/Utilities")
+SUPPORT="$HOME/Library/Application Support"
 
 usage() {
   cat <<'EOF'
@@ -33,6 +34,9 @@ Clone options:
                      automatically for known browsers (Chromium: --user-data-dir,
                      Firefox: -no-remote --profile); pass this for anything else.
   --no-profile       Do not wrap the executable; the clone shares the original's data
+  --seed             Start the clone's profile from a copy of the original's data
+                     (bookmarks, extensions, sessions; caches and locks skipped)
+  --seed-from <dir>  Seed from this directory instead of the detected one
   --icon <file>      Give the clone a different icon. A .icns is used as-is; any
                      other image (PNG, JPG, ...) is converted. Use a square image.
   --keep-updater     Keep Sparkle/Keystone auto-update keys (default: strip them)
@@ -44,16 +48,33 @@ Notes:
   * The clone will not auto-update. Re-run clowner after the original updates.
   * Cloning App Store or /System apps is unsupported; their signatures are not
     reproducible ad-hoc and the copies usually refuse to launch.
+  * Quit the original before --seed: copying a live profile can copy a
+    half-written database.
 EOF
 }
 
 die() { printf 'clowner: %s\n' "$1" >&2; exit 1; }
 say() { printf '==> %s\n' "$1"; }
+warn() { printf 'clowner: %s\n' "$1" >&2; }
 
 plist() { /usr/libexec/PlistBuddy "$@"; }
 
 plist_get() {
   plist -c "Print :$2" "$1/Contents/Info.plist" 2>/dev/null || true
+}
+
+# read does not expand ~, and a path dragged into a terminal arrives quoted or
+# backslash-escaped. Echo a usable path, or nothing if none of the readings exist.
+resolve_path() {
+  local raw="$1" p
+  for p in "$raw" "$(printf '%s' "$raw" | sed "s/^['\"]//; s/['\"]\$//")" "$(printf '%s' "$raw" | sed 's/\\ / /g')"; do
+    case "$p" in
+      "~") p="$HOME" ;;
+      "~/"*) p="$HOME/${p#\~/}" ;;
+    esac
+    [ -e "$p" ] && { printf '%s\n' "$p"; return 0; }
+  done
+  return 0
 }
 
 # An app is Chromium-based if its framework ships the renderer helper.
@@ -75,6 +96,10 @@ app_family() {
   if is_chromium "$1"; then echo chromium
   elif is_firefox "$1"; then echo firefox
   else echo other; fi
+}
+
+app_running() {
+  pgrep -f "$1/Contents/MacOS/" >/dev/null 2>&1
 }
 
 # ---------------------------------------------------------------- discovery
@@ -106,6 +131,97 @@ cmd_list() {
   while IFS= read -r app; do describe_app "$app"; done < <(list_apps)
 }
 
+# ------------------------------------------------- the original's own profile
+
+# Firefox keeps its profiles under a per-app support directory listed nowhere in
+# Info.plist; map the known forks, fall back to the bundle name.
+firefox_root() {
+  case "$(plist_get "$1" CFBundleIdentifier)" in
+    org.mozilla.firefox|org.mozilla.firefoxdeveloperedition|org.mozilla.nightly)
+      printf '%s\n' "$SUPPORT/Firefox" ;;
+    org.mozilla.librewolf) printf '%s\n' "$SUPPORT/LibreWolf" ;;
+    org.torproject.torbrowser) printf '%s\n' "$SUPPORT/TorBrowser-Data/Browser" ;;
+    app.zen-browser.zen) printf '%s\n' "$SUPPORT/zen" ;;
+    *) printf '%s\n' "$SUPPORT/$(plist_get "$1" CFBundleName)" ;;
+  esac
+}
+
+# The profile directory Firefox itself would open: the one flagged Default=1 in
+# profiles.ini, else the install's Default=, else the first listed.
+firefox_default_profile() {
+  local root ini path
+  root="$(firefox_root "$1")"
+  ini="$root/profiles.ini"
+  [ -f "$ini" ] || return 0
+
+  path="$(awk -F= '/^\[/{s=$0;p=""} s ~ /^\[Profile/ && $1=="Path"{p=$2} s ~ /^\[Profile/ && $1=="Default" && $2=="1"{print p; exit}' "$ini")"
+  [ -n "$path" ] || path="$(awk -F= '/^\[/{s=$0} s ~ /^\[Install/ && $1=="Default"{print $2; exit}' "$ini")"
+  [ -n "$path" ] || path="$(awk -F= '/^\[/{s=$0} s ~ /^\[Profile/ && $1=="Path"{print $2; exit}' "$ini")"
+  [ -n "$path" ] || return 0
+
+  case "$path" in
+    /*) [ -d "$path" ] && printf '%s\n' "$path" ;;
+    *)  [ -d "$root/$path" ] && printf '%s\n' "$root/$path" ;;
+  esac
+  return 0
+}
+
+# Where the ORIGINAL app keeps the data a clone could start from. Chromium
+# records its own directory in Info.plist (CrProductDirName); older builds and
+# Chrome itself do not, so the well-known ones are listed.
+source_data_dir() {
+  local app="$1" family="$2" dir name
+  case "$family" in
+    chromium)
+      dir="$(plist_get "$app" CrProductDirName)"
+      if [ -z "$dir" ]; then
+        case "$(plist_get "$app" CFBundleIdentifier)" in
+          com.google.Chrome)          dir="Google/Chrome" ;;
+          com.google.Chrome.beta)     dir="Google/Chrome Beta" ;;
+          com.google.Chrome.canary)   dir="Google/Chrome Canary" ;;
+          com.brave.Browser)          dir="BraveSoftware/Brave-Browser" ;;
+          com.brave.Browser.beta)     dir="BraveSoftware/Brave-Browser-Beta" ;;
+          com.brave.Browser.nightly)  dir="BraveSoftware/Brave-Browser-Nightly" ;;
+          com.microsoft.edgemac)      dir="Microsoft Edge" ;;
+          com.vivaldi.Vivaldi)        dir="Vivaldi" ;;
+          com.operasoftware.Opera)    dir="com.operasoftware.Opera" ;;
+          company.thebrowser.Browser) dir="Arc/User Data" ;;
+          *) dir="$(plist_get "$app" CFBundleName)" ;;
+        esac
+      fi
+      [ -n "$dir" ] && [ -d "$SUPPORT/$dir" ] && printf '%s\n' "$SUPPORT/$dir"
+      ;;
+    firefox)
+      firefox_default_profile "$app"
+      ;;
+    *)
+      name="$(plist_get "$app" CFBundleName)"
+      [ -n "$name" ] && [ -d "$SUPPORT/$name" ] && printf '%s\n' "$SUPPORT/$name"
+      ;;
+  esac
+  return 0
+}
+
+# Caches, crash dumps and single-instance locks: regenerated on first launch,
+# and a copied lock makes the clone think it is already running.
+SEED_SKIP=(
+  Cache "Code Cache" GPUCache DawnCache DawnGraphiteCache DawnWebGPUCache
+  GrShaderCache ShaderCache CacheStorage "Service Worker/CacheStorage"
+  Crashpad component_crx_cache optimization_guide_model_store
+  "BrowserMetrics*" "*.pma" "Safe Browsing*" blob_storage
+  "Singleton*" lockfile .parentlock lock
+  cache2 startupCache
+)
+
+seed_profile() {
+  local from="$1" to="$2" skip=() x status=0
+  for x in "${SEED_SKIP[@]}"; do skip+=(--exclude "$x"); done
+  mkdir -p "$to"
+  rsync -a "${skip[@]}" "$from/" "$to/" || status=$?
+  # 24: source files vanished mid-copy (the original was running). Harmless.
+  [ "$status" -eq 0 ] || [ "$status" -eq 24 ] || die "could not copy $from (rsync exit $status)"
+}
+
 # ---------------------------------------------------------------- the wizard
 
 pick_app() {
@@ -131,6 +247,7 @@ pick_app() {
 
 ICON_EXTS='png|jpg|jpeg|icns|tiff|tif|heic|gif|bmp|webp'
 ICON_DIRS=("$HOME/Desktop" "$HOME/Downloads" "$HOME/Pictures" "$PWD")
+ICON_KEEP='keep the original icon'
 
 # Echo a chosen icon image path, or nothing to keep the original. Lists image
 # files from a few common folders; fzf when available, numbered menu otherwise.
@@ -143,46 +260,67 @@ pick_icon() {
   )
 
   if command -v fzf >/dev/null 2>&1; then
-    local out query choice
-    out="$( { printf '%s\n' '— keep original icon —'; \
+    local out status=0 query choice
+    out="$( { printf '%s\n' "$ICON_KEEP"; \
               if [ "${#imgs[@]}" -gt 0 ]; then printf '%s\n' "${imgs[@]}"; fi; } | fzf \
-      --prompt='icon (pick, or type a path): ' --print-query --height=60% --reverse --border \
-      --preview='sips -g pixelWidth -g pixelHeight {} 2>/dev/null | tail -2' \
-      --preview-window=down:3 )"
+      --prompt='icon (pick one, or type a path): ' --print-query --height=60% --reverse --border \
+      --preview='sips -g pixelWidth -g pixelHeight "{}" 2>/dev/null | tail -2' \
+      --preview-window=down:3 )" || status=$?
     query="$(printf '%s\n' "$out" | sed -n 1p)"
     choice="$(printf '%s\n' "$out" | sed -n 2p)"
-    if [ -n "$choice" ] && [ "$choice" != '— keep original icon —' ]; then
-      printf '%s\n' "$choice"
-    elif [ -n "$query" ]; then
-      printf '%s\n' "$query"   # typed path with no list match
-    fi
-    return
+
+    case "$status" in
+      0)   # something in the list was picked
+        [ "$choice" = "$ICON_KEEP" ] || validated_icon "$choice" ;;
+      1)   # no list entry matched, so the query is meant to be a path
+        [ -n "$query" ] && validated_icon "$query" ;;
+      *) ;; # 130 = escaped out; keep the original
+    esac
+    return 0
   fi
 
-  # No fzf: numbered menu of found images, plus manual entry / keep.
   if [ "${#imgs[@]}" -eq 0 ]; then
     local p
     read -r -p "Icon image path (blank to keep original): " p </dev/tty
-    [ -n "$p" ] && printf '%s\n' "$p"
-    return
+    [ -n "$p" ] && validated_icon "$p"
+    return 0
   fi
   printf 'Choose an icon:\n' >&2
   local choice
   select choice in "${imgs[@]}" "Type a path…" "Keep original icon"; do
     case "$choice" in
-      "Keep original icon"|"") return ;;
+      "Keep original icon"|"") return 0 ;;
       "Type a path…")
         read -r -p "Icon image path: " choice </dev/tty
-        [ -n "$choice" ] && printf '%s\n' "$choice"; return ;;
-      *) printf '%s\n' "$choice"; return ;;
+        [ -n "$choice" ] && validated_icon "$choice"; return 0 ;;
+      *) validated_icon "$choice"; return 0 ;;
     esac
   done
+}
+
+# Echo the image if it exists; otherwise say so, loudly, and echo nothing. A
+# typo used to disappear here and the clone came out with the original's icon.
+validated_icon() {
+  local p
+  p="$(resolve_path "$1")"
+  if [ -n "$p" ] && [ -f "$p" ]; then
+    printf '%s\n' "$p"
+  else
+    warn "no such image: $1 (keeping the original icon)"
+  fi
+  return 0
 }
 
 ask() { # ask <prompt> <default> -> stdout
   local answer
   read -r -p "$1 [$2]: " answer </dev/tty
   printf '%s\n' "${answer:-$2}"
+}
+
+confirm() { # confirm <prompt> -> 0 if yes
+  local answer
+  read -r -p "$1 [y/N]: " answer </dev/tty
+  case "$answer" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
 }
 
 cmd_wizard() {
@@ -206,11 +344,20 @@ cmd_wizard() {
 
   local args=(--src "$src" --name "$name" --id "$id" --dest "$dest")
   if [ "$family" != "other" ]; then
-    profile="$(ask 'Separate profile directory (- for none)' "$HOME/Library/Application Support/Clowner/$name")"
+    profile="$(ask 'Separate profile directory (- for none)' "$SUPPORT/Clowner/$name")"
     if [ "$profile" = "-" ]; then
       args+=(--no-profile)
     else
       args+=(--profile "$profile")
+
+      local from
+      from="$(source_data_dir "$src" "$family")"
+      if [ -n "$from" ]; then
+        printf '\n  %s keeps its data in:\n    %s\n' "$(basename "$src" .app)" "$from"
+        printf '  Copying it gives the clone the same bookmarks, extensions and logins.\n'
+        app_running "$src" && printf '  NOTE: %s is running; quit it first for a clean copy.\n' "$(basename "$src" .app)"
+        confirm "  Start the clone from a copy of that data?" && args+=(--seed-from "$from")
+      fi
     fi
   fi
 
@@ -245,8 +392,8 @@ resign_adhoc() {
 # iconset (falling back to a single sips conversion).
 set_icon() {
   local clone="$1" img="$2"
-  local iconkey target
-  iconkey="$(plist -c 'Print :CFBundleIconFile' "$clone/Contents/Info.plist" 2>/dev/null)" || iconkey=""
+  local info="$clone/Contents/Info.plist" iconkey target
+  iconkey="$(plist -c 'Print :CFBundleIconFile' "$info" 2>/dev/null)" || iconkey=""
   [ -n "$iconkey" ] || iconkey="app"
   case "$iconkey" in *.icns) ;; *) iconkey="$iconkey.icns" ;; esac
   target="$clone/Contents/Resources/$iconkey"
@@ -254,8 +401,13 @@ set_icon() {
   # Modern apps load their icon from a compiled asset catalog (Assets.car) via
   # CFBundleIconName, which overrides the .icns. Drop that key so our .icns wins.
   # (The catalog stays in place; it just stops being the icon source.)
-  plist -c "Delete :CFBundleIconName" "$clone/Contents/Info.plist" 2>/dev/null || true
+  plist -c "Delete :CFBundleIconName" "$info" 2>/dev/null || true
+  # An app with no CFBundleIconFile at all (icon only in the catalog) needs the
+  # key added, or nothing points at the file we just wrote.
+  plist -c "Set :CFBundleIconFile $iconkey" "$info" 2>/dev/null \
+    || plist -c "Add :CFBundleIconFile string $iconkey" "$info" 2>/dev/null || true
 
+  mkdir -p "$clone/Contents/Resources"
   case "$img" in
     *.icns|*.ICNS)
       cp "$img" "$target"
@@ -277,6 +429,17 @@ set_icon() {
       rm -rf "$(dirname "$set_dir")"
       ;;
   esac
+  [ -s "$target" ] || die "icon conversion produced an empty $iconkey from $img"
+}
+
+# macOS caches icons and names per bundle path, so a fresh clone at a path that
+# held an older one shows the old icon until Launch Services is told otherwise.
+refresh_launch_services() {
+  local app="$1"
+  local lsr=/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister
+  touch "$app" 2>/dev/null || true
+  [ -x "$lsr" ] && "$lsr" -f "$app" >/dev/null 2>&1
+  return 0
 }
 
 # ---------------------------------------------------------------- the clone
@@ -284,6 +447,7 @@ set_icon() {
 cmd_clone() {
   local src="" name="" bundle_id="" dest="" profile="" old_id icon=""
   local wrap=auto wrap_args="" wrap_args_set=0 keep_updater=0 force=0 assume_yes=0
+  local seed=0 seed_from=""
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -294,6 +458,8 @@ cmd_clone() {
       --profile) profile="${2:-}"; wrap=yes; shift 2 ;;
       --args) wrap_args="${2:-}"; wrap_args_set=1; wrap=yes; shift 2 ;;
       --no-profile) wrap=no; shift ;;
+      --seed) seed=1; shift ;;
+      --seed-from) seed_from="${2:-}"; seed=1; shift 2 ;;
       --icon) icon="${2:-}"; shift 2 ;;
       --keep-updater) keep_updater=1; shift ;;
       --force) force=1; shift ;;
@@ -306,7 +472,10 @@ cmd_clone() {
   [ -n "$src" ] || die "--src is required"
   [ -n "$name" ] || die "--name is required"
   [ -d "$src" ] && [ -f "$src/Contents/Info.plist" ] || die "not an app bundle: $src"
-  [ -z "$icon" ] || [ -f "$icon" ] || die "icon file not found: $icon"
+  if [ -n "$icon" ]; then
+    icon="$(resolve_path "$icon")"
+    [ -n "$icon" ] && [ -f "$icon" ] || die "icon file not found: $icon"
+  fi
 
   bundle_id="${bundle_id:-$name}"
   dest="${dest:-/Applications/$name.app}"
@@ -324,7 +493,7 @@ cmd_clone() {
     if [ "$family" = "other" ]; then wrap=no; else wrap=yes; fi
   fi
   if [ "$wrap" = yes ]; then
-    profile="${profile:-$HOME/Library/Application Support/Clowner/$name}"
+    profile="${profile:-$SUPPORT/Clowner/$name}"
     # Flags that give the clone a separate instance. Supplied generically with
     # --args (any app), or filled in from a known browser family as a default.
     if [ "$wrap_args_set" -eq 0 ]; then
@@ -336,6 +505,18 @@ cmd_clone() {
     fi
   fi
 
+  if [ "$seed" -eq 1 ]; then
+    [ "$wrap" = yes ] || die "--seed needs a profile of its own; drop --no-profile"
+    [ -n "$profile" ] || die "--seed needs --profile"
+    if [ -n "$seed_from" ]; then
+      seed_from="$(resolve_path "$seed_from")"
+      [ -n "$seed_from" ] && [ -d "$seed_from" ] || die "seed directory not found"
+    else
+      seed_from="$(source_data_dir "$src" "$family")"
+      [ -n "$seed_from" ] || die "could not find where $(basename "$src" .app) keeps its data (pass --seed-from <dir>)"
+    fi
+  fi
+
   if [ -e "$dest" ] && [ "$force" -eq 0 ]; then
     die "destination exists: $dest (use --force to overwrite)"
   fi
@@ -344,8 +525,17 @@ cmd_clone() {
   printf '  %-11s %s\n' "clone:" "$dest"
   printf '  %-11s %s -> %s\n' "bundle id:" "$old_id" "$bundle_id"
   [ "$wrap" = yes ] && printf '  %-11s %s\n' "wrap:" "$wrap_args"
-  [ -n "$icon" ] && printf '  %-11s %s\n' "icon:" "$icon"
+  [ "$seed" -eq 1 ] && printf '  %-11s %s\n' "seed:" "$seed_from"
+  if [ -n "$icon" ]; then
+    printf '  %-11s %s\n' "icon:" "$icon"
+  else
+    printf '  %-11s %s\n' "icon:" "(keeping the original's)"
+  fi
   printf '\n'
+
+  if [ "$seed" -eq 1 ] && app_running "$src"; then
+    warn "$(basename "$src" .app) is running, so its profile may be copied half-written"
+  fi
 
   if [ "$assume_yes" -eq 0 ]; then
     local go
@@ -414,6 +604,11 @@ EOF
     chmod +x "$bin_dir/$exe"
   fi
 
+  if [ "$seed" -eq 1 ]; then
+    say "Seeding profile from $seed_from"
+    seed_profile "$seed_from" "$profile"
+  fi
+
   if [ -n "$icon" ]; then
     say "Setting icon ($icon)"
     set_icon "$dest" "$icon"
@@ -423,9 +618,14 @@ EOF
   xattr -cr "$dest" 2>/dev/null || true
   resign_adhoc "$dest"
 
+  say "Refreshing Launch Services"
+  refresh_launch_services "$dest"
+
   say "Done"
   codesign -dv "$dest" 2>&1 | grep -E 'Identifier=|Signature=' | sed 's/^/    /' || true
   printf '    run: open -a "%s"\n' "$dest"
+  [ -n "$icon" ] && printf '    if the old icon lingers: killall Dock Finder\n'
+  return 0
 }
 
 # ---------------------------------------------------------------- entrypoint
