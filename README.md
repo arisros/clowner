@@ -134,7 +134,8 @@ window instead of handing off to the running one. There are three shapes:
    skipping caches, crash dumps and the single-instance locks.
 6. Clears quarantine attributes and re-signs with `codesign --force --deep --sign -`,
    then re-registers the bundle with Launch Services so the new name and icon
-   take effect.
+   take effect. The `--seed` copy runs after this, so the bundle spends as
+   little time as possible in /Applications with a broken signature.
 
 ## Changing the icon
 
@@ -186,6 +187,12 @@ first launch, and a copied lock makes the clone think it is already running.
 Everything else is copied, so expect the clone's profile to be roughly the size
 of the original's (`du -sh` it first: a daily-driver Chromium profile is easily
 a few GB).
+
+On a machine with endpoint security software, seed a clone into `/Applications`
+only with clowner (or sign the bundle yourself first). Between the copy and the
+re-sign the clone is a browser with a broken signature, and a scanner can delete
+it while a multi-GB profile copy is still running. clowner seeds after signing
+for exactly this reason.
 
 **Quit the original first.** Its databases are copied file by file, and a
 browser that is running will be mid-write in some of them.

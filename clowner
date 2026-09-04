@@ -604,11 +604,6 @@ EOF
     chmod +x "$bin_dir/$exe"
   fi
 
-  if [ "$seed" -eq 1 ]; then
-    say "Seeding profile from $seed_from"
-    seed_profile "$seed_from" "$profile"
-  fi
-
   if [ -n "$icon" ]; then
     say "Setting icon ($icon)"
     set_icon "$dest" "$icon"
@@ -620,6 +615,15 @@ EOF
 
   say "Refreshing Launch Services"
   refresh_launch_services "$dest"
+
+  # Last, deliberately. Between the copy and the re-sign the bundle is a browser
+  # with a broken signature sitting in /Applications, and seeding a multi-GB
+  # profile keeps it in that state for minutes; endpoint security software has
+  # been observed deleting it in that window. Signing first closes it.
+  if [ "$seed" -eq 1 ]; then
+    say "Seeding profile from $seed_from"
+    seed_profile "$seed_from" "$profile"
+  fi
 
   say "Done"
   codesign -dv "$dest" 2>&1 | grep -E 'Identifier=|Signature=' | sed 's/^/    /' || true
